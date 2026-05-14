@@ -97,16 +97,28 @@ def process_file(job_id: str, file_path: str, jobs: dict) -> None:
 
 # ── Step 1: slide conversion ──────────────────────────────────────────────────
 
+MAX_SLIDES = 10  # hard cap to stay within 512 MB free-tier RAM
+
+
 def _convert_to_images(file_path: str, output_dir: str, ext: str) -> list[str]:
     slides_dir = os.path.join(output_dir, "slides")
     os.makedirs(slides_dir, exist_ok=True)
 
     if ext == ".pdf":
-        pages = convert_from_path(file_path, dpi=150, fmt="png", poppler_path=POPPLER_PATH)
+        # Convert one page at a time at 96 DPI to minimise peak RAM usage.
+        # 96 DPI is plenty for a 1080×1920 screen video.
         paths = []
-        for i, page in enumerate(pages):
-            out = os.path.join(slides_dir, f"slide_{i:03d}.png")
-            page.save(out, "PNG")
+        for i in range(1, MAX_SLIDES + 1):
+            pages = convert_from_path(
+                file_path, dpi=96, fmt="png",
+                poppler_path=POPPLER_PATH,
+                first_page=i, last_page=i,
+            )
+            if not pages:
+                break
+            out = os.path.join(slides_dir, f"slide_{i - 1:03d}.png")
+            pages[0].save(out, "PNG")
+            pages[0].close()
             paths.append(out)
         return paths
 
@@ -360,6 +372,11 @@ def _ffmpeg_fallback(
             capture_output=True,
         )
         segments.append(seg)
+        # Free disk space — the source image is no longer needed
+        try:
+            os.remove(img)
+        except OSError:
+            pass
         if jobs is not None and job_id is not None:
             jobs[job_id]["progress"] = 75 + int(20 * (i + 1) / n)
 
