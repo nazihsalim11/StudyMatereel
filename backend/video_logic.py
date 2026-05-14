@@ -336,13 +336,15 @@ def _ffmpeg_fallback(image_paths: list[str], audio_paths: list[str], output_path
                 "ffmpeg", "-y",
                 "-loop", "1", "-i", img,
                 "-i", aud,
-                "-c:v", "libx264", "-tune", "stillimage",
-                "-c:a", "aac", "-b:a", "192k",
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+                "-tune", "stillimage",
+                "-c:a", "aac", "-b:a", "128k",
                 "-vf", (
                     "scale=1080:1920:force_original_aspect_ratio=decrease,"
                     "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black"
                 ),
                 "-shortest", "-t", str(duration),
+                "-threads", "1",
                 seg,
             ],
             check=True,
