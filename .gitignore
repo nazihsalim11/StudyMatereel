@@ -1,0 +1,27 @@
+# Environment secrets
+.env
+backend/.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+build/
+
+# Node / Next.js
+node_modules/
+.next/
+frontend/.next/
+remotion/.next/
+
+# Temporary pipeline assets (keep the directory itself)
+temporary_storage/uploads/*
+temporary_storage/videos/*
+temporary_storage/*/
+!temporary_storage/.gitkeep
+
+# OS
+.DS_Store
+Thumbs.db
