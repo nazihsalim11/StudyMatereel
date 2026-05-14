@@ -8,24 +8,17 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     curl \
     --no-install-recommends \
-    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
-    && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-COPY backend/requirements.txt ./requirements.txt
+COPY requirements.txt .
 
 # Install pydantic-core binary first, then the rest of the packages
 RUN pip install --no-cache-dir --prefer-binary pydantic-core==2.18.4 \
     && pip install --no-cache-dir --prefer-binary -r requirements.txt
 
-# Install Remotion dependencies
-COPY remotion/package.json remotion/package-lock.json ./remotion/
-RUN cd remotion && npm ci --omit=dev
-
-COPY backend/ ./
-COPY remotion/ ./remotion/
+COPY . .
 
 RUN mkdir -p temporary_storage/uploads temporary_storage/videos
 
