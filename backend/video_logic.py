@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 
-# ── Windows tool paths ───────────────────────────────────────────────────────────────────────────────
+# ── Windows tool paths ────────────────────────────────────────────────────────
 # Override via .env if you installed to a non-default location.
 IS_WINDOWS = platform.system() == "Windows"
 
@@ -35,13 +35,13 @@ LIBREOFFICE_PATH: str = os.getenv("LIBREOFFICE_PATH") or (
 )
 
 
-# ── Job state helper ─────────────────────────────────────────────────────────────────────────────
+# ── Job state helper ──────────────────────────────────────────────────────────
 
 def _update(jobs: dict, job_id: str, **kwargs) -> None:
     jobs[job_id].update(kwargs)
 
 
-# ── Main pipeline ──────────────────────────────────────────────────────────────────────────────
+# ── Main pipeline ─────────────────────────────────────────────────────────────
 
 def process_file(job_id: str, file_path: str, jobs: dict) -> None:
     """Entry point called by FastAPI BackgroundTasks."""
@@ -95,7 +95,7 @@ def process_file(job_id: str, file_path: str, jobs: dict) -> None:
         _update(jobs, job_id, status="failed", error=traceback.format_exc(limit=3))
 
 
-# ── Step 1: slide conversion ──────────────────────────────────────────────────────────────────────────
+# ── Step 1: slide conversion ──────────────────────────────────────────────────
 
 def _convert_to_images(file_path: str, output_dir: str, ext: str) -> list[str]:
     slides_dir = os.path.join(output_dir, "slides")
@@ -137,7 +137,7 @@ def _convert_to_images(file_path: str, output_dir: str, ext: str) -> list[str]:
     raise ValueError(f"Unsupported extension: {ext}")
 
 
-# ── Step 2: script generation ─────────────────────────────────────────────────────────────────────────
+# ── Step 2: script generation ─────────────────────────────────────────────────
 
 def _generate_scripts(image_paths: list[str]) -> list[str]:
     if not GROQ_API_KEY:
@@ -184,7 +184,7 @@ def _generate_scripts(image_paths: list[str]) -> list[str]:
         return [f"Slide {i + 1}." for i in range(len(image_paths))]
 
 
-# ── Step 3: audio synthesis ───────────────────────────────────────────────────────────────────────────
+# ── Step 3: audio synthesis ───────────────────────────────────────────────────
 
 def _generate_audio(scripts: list[str], output_dir: str) -> list[str]:
     audio_dir = os.path.join(output_dir, "audio")
@@ -214,7 +214,7 @@ def _silent_stub(path: str, duration_s: int = 3) -> str:
     return path
 
 
-# ── Step 4: subtitle generation ─────────────────────────────────────────────────────────────────────────
+# ── Step 4: subtitle generation ───────────────────────────────────────────────
 
 def _build_subtitles(scripts: list[str], audio_paths: list[str]) -> list[dict]:
     """
@@ -267,7 +267,7 @@ def _audio_duration(audio_path: str) -> float:
         return 4.0
 
 
-# ── Step 5: Remotion render ───────────────────────────────────────────────────────────────────────────
+# ── Step 5: Remotion render ───────────────────────────────────────────────────
 
 def _render_video(
     job_id: str,
@@ -336,13 +336,15 @@ def _ffmpeg_fallback(image_paths: list[str], audio_paths: list[str], output_path
                 "ffmpeg", "-y",
                 "-loop", "1", "-i", img,
                 "-i", aud,
-                "-c:v", "libx264", "-tune", "stillimage",
-                "-c:a", "aac", "-b:a", "192k",
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+                "-tune", "stillimage",
+                "-c:a", "aac", "-b:a", "128k",
                 "-vf", (
                     "scale=1080:1920:force_original_aspect_ratio=decrease,"
                     "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black"
                 ),
                 "-shortest", "-t", str(duration),
+                "-threads", "1",
                 seg,
             ],
             check=True,

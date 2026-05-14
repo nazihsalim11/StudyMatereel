@@ -49,9 +49,14 @@ class JobStatus(BaseModel):
     error: Optional[str] = None
 
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 async def root():
     return {"message": "StudyReels API is running", "version": "1.0.0"}
+
+
+@app.api_route("/health", methods=["GET", "HEAD"])
+async def health():
+    return {"status": "ok"}
 
 
 @app.post("/upload")
