@@ -4,6 +4,7 @@ FROM --platform=linux/amd64 python:3.11-slim
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     poppler-utils \
+    libreoffice-impress \
     build-essential \
     curl \
     --no-install-recommends \
