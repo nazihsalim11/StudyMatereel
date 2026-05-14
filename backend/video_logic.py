@@ -5,7 +5,9 @@ Core pipeline: PDF/PPTX → slide images → Gemini scripts → ElevenLabs audio
 import json
 import logging
 import os
+import platform
 import subprocess
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -21,14 +23,25 @@ ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 
+# ── Windows tool paths ─────────────────────────────────────────────
+IS_WINDOWS = platform.system() == "Windows"
 
-# ── Job state helper ──────────────────────────────────────────────────────────
+POPPLER_PATH: str | None = os.getenv("POPPLER_PATH") or (
+    r"C:\poppler\Library\bin" if IS_WINDOWS else None
+)
+
+LIBREOFFICE_PATH: str = os.getenv("LIBREOFFICE_PATH") or (
+    r"C:\Program Files\LibreOffice\program\soffice.exe" if IS_WINDOWS else "libreoffice"
+)
+
+
+# ── Job state helper ─────────────────────────────────────────────
 
 def _update(jobs: dict, job_id: str, **kwargs) -> None:
     jobs[job_id].update(kwargs)
 
 
-# ── Main pipeline ─────────────────────────────────────────────────────────────
+# ── Main pipeline ─────────────────────────────────────────────
 
 def process_file(job_id: str, file_path: str, jobs: dict) -> None:
     """Entry point called by FastAPI BackgroundTasks."""
@@ -82,14 +95,14 @@ def process_file(job_id: str, file_path: str, jobs: dict) -> None:
         _update(jobs, job_id, status="failed", error=traceback.format_exc(limit=3))
 
 
-# ── Step 1: slide conversion ──────────────────────────────────────────────────
+# ── Step 1: slide conversion ────────────────────────────────────────────
 
 def _convert_to_images(file_path: str, output_dir: str, ext: str) -> list[str]:
     slides_dir = os.path.join(output_dir, "slides")
     os.makedirs(slides_dir, exist_ok=True)
 
     if ext == ".pdf":
-        pages = convert_from_path(file_path, dpi=150, fmt="png")
+        pages = convert_from_path(file_path, dpi=150, fmt="png", poppler_path=POPPLER_PATH)
         paths = []
         for i, page in enumerate(pages):
             out = os.path.join(slides_dir, f"slide_{i:03d}.png")
@@ -98,10 +111,15 @@ def _convert_to_images(file_path: str, output_dir: str, ext: str) -> list[str]:
         return paths
 
     if ext == ".pptx":
-        # Convert PPTX → PDF via LibreOffice, then recurse
+        if IS_WINDOWS and not Path(LIBREOFFICE_PATH).exists():
+            raise RuntimeError(
+                f"LibreOffice not found at '{LIBREOFFICE_PATH}'. "
+                "Please install it from https://www.libreoffice.org/download/download/ "
+                "or set LIBREOFFICE_PATH in your .env file."
+            )
         result = subprocess.run(
             [
-                "libreoffice",
+                LIBREOFFICE_PATH,
                 "--headless",
                 "--convert-to", "pdf",
                 "--outdir", os.path.dirname(file_path),
@@ -118,13 +136,9 @@ def _convert_to_images(file_path: str, output_dir: str, ext: str) -> list[str]:
     raise ValueError(f"Unsupported extension: {ext}")
 
 
-# ── Step 2: script generation ─────────────────────────────────────────────────
+# ── Step 2: script generation ────────────────────────────────────────────
 
 def _generate_scripts(image_paths: list[str]) -> list[str]:
-    """
-    Call Gemini 1.5 Flash Vision to produce a short narration for each slide.
-    Falls back to placeholder text when GEMINI_API_KEY is not set.
-    """
     if not GEMINI_API_KEY:
         logger.warning("GEMINI_API_KEY not set — using placeholder scripts.")
         return [f"This is slide {i + 1}." for i in range(len(image_paths))]
@@ -153,13 +167,9 @@ def _generate_scripts(image_paths: list[str]) -> list[str]:
         return [f"Slide {i + 1}." for i in range(len(image_paths))]
 
 
-# ── Step 3: audio synthesis ───────────────────────────────────────────────────
+# ── Step 3: audio synthesis ────────────────────────────────────────────
 
 def _generate_audio(scripts: list[str], output_dir: str) -> list[str]:
-    """
-    Send each script to ElevenLabs TTS and save the resulting MP3.
-    Generates silent stub files when ELEVENLABS_API_KEY is not set.
-    """
     audio_dir = os.path.join(output_dir, "audio")
     os.makedirs(audio_dir, exist_ok=True)
 
@@ -191,9 +201,8 @@ def _generate_audio(scripts: list[str], output_dir: str) -> list[str]:
 
 
 def _silent_stub(path: str, duration_s: int = 3) -> str:
-    """Create a silent MP3 of the given duration using ffmpeg."""
     subprocess.run(
-        ["ffmpeg", "-y", "-f", "lavfi", "-i", f"anullsrc=r=44100:cl=mono",
+        ["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",
          "-t", str(duration_s), path],
         check=True,
         capture_output=True,
@@ -201,17 +210,9 @@ def _silent_stub(path: str, duration_s: int = 3) -> str:
     return path
 
 
-# ── Step 4: subtitle generation ───────────────────────────────────────────────
+# ── Step 4: subtitle generation ────────────────────────────────────────────
 
 def _build_subtitles(scripts: list[str], audio_paths: list[str]) -> list[dict]:
-    """
-    Produce word-level timestamps using a naïve even-distribution model.
-
-    Schema:
-      [{"slide": 0, "words": [{"word": "Hello", "start": 0.0, "end": 0.3}]}]
-
-    For production, replace with Whisper forced-alignment timestamps.
-    """
     result = []
     for i, (script, audio_path) in enumerate(zip(scripts, audio_paths)):
         duration = _audio_duration(audio_path)
@@ -254,7 +255,7 @@ def _audio_duration(audio_path: str) -> float:
         return 4.0
 
 
-# ── Step 5: Remotion render ───────────────────────────────────────────────────
+# ── Step 5: Remotion render ─────────────────────────────────────────────
 
 def _render_video(
     job_id: str,
@@ -267,7 +268,6 @@ def _render_video(
     os.makedirs(videos_dir, exist_ok=True)
     output_path = os.path.join(videos_dir, f"{job_id}.mp4")
 
-    # Build props for the Remotion composition
     props = {
         "slides": [
             {
@@ -290,12 +290,7 @@ def _render_video(
 
     try:
         subprocess.run(
-            [
-                "npx", "remotion", "render",
-                "StudyReel",
-                output_path,
-                "--props", props_path,
-            ],
+            ["npx", "remotion", "render", "StudyReel", output_path, "--props", props_path],
             cwd=remotion_dir,
             check=True,
             timeout=600,
@@ -308,10 +303,6 @@ def _render_video(
 
 
 def _ffmpeg_fallback(image_paths: list[str], audio_paths: list[str], output_path: str) -> None:
-    """
-    Stitch slides + audio into a 1080×1920 vertical MP4 using ffmpeg.
-    Used when Remotion is not installed / fails.
-    """
     segment_dir = os.path.dirname(output_path)
     segments = []
 
@@ -348,7 +339,6 @@ def _ffmpeg_fallback(image_paths: list[str], audio_paths: list[str], output_path
         capture_output=True,
     )
 
-    # Clean up segment files
     for seg in segments:
         os.remove(seg)
     os.remove(concat_list)
