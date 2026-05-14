@@ -1,7 +1,6 @@
-FROM python:3.11
+# Force linux/amd64 so pip always finds pre-built wheels (no Rust compilation needed)
+FROM --platform=linux/amd64 python:3.11-slim
 
-# System deps: ffmpeg (video), poppler (PDF→image), build tools (pydantic-core compile)
-# LibreOffice is excluded here to keep build times low — PDF uploads work out of the box.
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     poppler-utils \
@@ -14,12 +13,9 @@ WORKDIR /app
 
 COPY requirements.txt .
 
-# Install Rust AND Python packages in ONE RUN so cargo is on PATH during pip install.
-# --prefer-binary picks pre-built wheels first; Rust is only used as a fallback compiler.
-RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain stable \
-    && . /root/.cargo/env \
-    && pip install --no-cache-dir --prefer-binary -r requirements.txt \
-    && rm -rf /root/.cargo/registry /root/.cargo/git
+# Install pydantic-core binary first, then the rest of the packages
+RUN pip install --no-cache-dir --prefer-binary pydantic-core==2.18.4 \
+    && pip install --no-cache-dir --prefer-binary -r requirements.txt
 
 COPY . .
 
