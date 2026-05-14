@@ -14,14 +14,16 @@ COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir --prefer-binary pydantic-core==2.18.4 \
     && pip install --no-cache-dir --prefer-binary -r /tmp/requirements.txt
 
-# HF Spaces requires a non-root user with UID 1000
-RUN useradd -m -u 1000 user
+# Create non-root user (UID 1000 required by HF Spaces)
+# and ensure the working directory is owned by that user
+RUN useradd -m -u 1000 user \
+    && mkdir -p /home/user/app/temporary_storage/uploads \
+               /home/user/app/temporary_storage/videos \
+    && chown -R user:user /home/user/app
 
 WORKDIR /home/user/app
 
 COPY --chown=user . .
-
-RUN mkdir -p temporary_storage/uploads temporary_storage/videos
 
 USER user
 
