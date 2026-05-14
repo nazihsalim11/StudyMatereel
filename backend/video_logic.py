@@ -1,7 +1,8 @@
 """
-Core pipeline: PDF/PPTX → slide images → Gemini scripts → ElevenLabs audio
+Core pipeline: PDF/PPTX → slide images → Groq scripts → ElevenLabs audio
               → word-level subtitles → Remotion video render.
 """
+import base64
 import json
 import logging
 import os
@@ -18,12 +19,12 @@ load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env")
 
 logger = logging.getLogger(__name__)
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 
-# ── Windows tool paths ────────────────────────────────────────────────────────
+# ── Windows tool paths ─────────────────────────────────────────────
 IS_WINDOWS = platform.system() == "Windows"
 
 POPPLER_PATH: str | None = os.getenv("POPPLER_PATH") or (
@@ -35,13 +36,13 @@ LIBREOFFICE_PATH: str = os.getenv("LIBREOFFICE_PATH") or (
 )
 
 
-# ── Job state helper ──────────────────────────────────────────────────────────
+# ── Job state helper ─────────────────────────────────────────────
 
 def _update(jobs: dict, job_id: str, **kwargs) -> None:
     jobs[job_id].update(kwargs)
 
 
-# ── Main pipeline ─────────────────────────────────────────────────────────────
+# ── Main pipeline ─────────────────────────────────────────────
 
 def process_file(job_id: str, file_path: str, jobs: dict) -> None:
     """Entry point called by FastAPI BackgroundTasks."""
@@ -52,24 +53,20 @@ def process_file(job_id: str, file_path: str, jobs: dict) -> None:
 
         ext = Path(file_path).suffix.lower()
 
-        # Step 1 ── Convert slides to PNG images
         logger.info("[%s] Converting slides to images…", job_id)
         image_paths = _convert_to_images(file_path, temp_dir, ext)
         if not image_paths:
             raise ValueError("No slides found in the uploaded file.")
         _update(jobs, job_id, progress=25)
 
-        # Step 2 ── Gemini Vision → narration scripts
-        logger.info("[%s] Generating scripts with Gemini…", job_id)
+        logger.info("[%s] Generating scripts with Groq…", job_id)
         scripts = _generate_scripts(image_paths)
         _update(jobs, job_id, progress=45)
 
-        # Step 3 ── ElevenLabs TTS → audio files
         logger.info("[%s] Synthesising audio with ElevenLabs…", job_id)
         audio_paths = _generate_audio(scripts, temp_dir)
         _update(jobs, job_id, progress=65)
 
-        # Step 4 ── Build word-level subtitle JSON
         logger.info("[%s] Building subtitles…", job_id)
         subtitle_data = _build_subtitles(scripts, audio_paths)
         subtitle_path = os.path.join(temp_dir, "subtitles.json")
@@ -77,16 +74,9 @@ def process_file(job_id: str, file_path: str, jobs: dict) -> None:
             json.dump(subtitle_data, f, indent=2, ensure_ascii=False)
         _update(jobs, job_id, progress=75)
 
-        # Step 5 ── Remotion render
         logger.info("[%s] Rendering video…", job_id)
         _render_video(job_id, image_paths, audio_paths, subtitle_data, temp_dir)
-        _update(
-            jobs,
-            job_id,
-            status="completed",
-            progress=100,
-            video_url=f"/videos/{job_id}.mp4",
-        )
+        _update(jobs, job_id, status="completed", progress=100, video_url=f"/videos/{job_id}.mp4")
         logger.info("[%s] Pipeline complete.", job_id)
 
     except Exception:
@@ -95,7 +85,7 @@ def process_file(job_id: str, file_path: str, jobs: dict) -> None:
         _update(jobs, job_id, status="failed", error=traceback.format_exc(limit=3))
 
 
-# ── Step 1: slide conversion ──────────────────────────────────────────────────
+# ── Step 1: slide conversion ────────────────────────────────────────────
 
 def _convert_to_images(file_path: str, output_dir: str, ext: str) -> list[str]:
     slides_dir = os.path.join(output_dir, "slides")
@@ -114,41 +104,31 @@ def _convert_to_images(file_path: str, output_dir: str, ext: str) -> list[str]:
         if IS_WINDOWS and not Path(LIBREOFFICE_PATH).exists():
             raise RuntimeError(
                 f"LibreOffice not found at '{LIBREOFFICE_PATH}'. "
-                "Please install it from https://www.libreoffice.org/download/download/ "
-                "or set LIBREOFFICE_PATH in your .env file."
+                "Install from https://www.libreoffice.org or set LIBREOFFICE_PATH in .env"
             )
         result = subprocess.run(
-            [
-                LIBREOFFICE_PATH,
-                "--headless",
-                "--convert-to", "pdf",
-                "--outdir", os.path.dirname(file_path),
-                file_path,
-            ],
-            capture_output=True,
-            timeout=120,
+            [LIBREOFFICE_PATH, "--headless", "--convert-to", "pdf",
+             "--outdir", os.path.dirname(file_path), file_path],
+            capture_output=True, timeout=120,
         )
         if result.returncode != 0:
             raise RuntimeError(f"LibreOffice conversion failed: {result.stderr.decode()}")
-        pdf_path = file_path.replace(".pptx", ".pdf")
-        return _convert_to_images(pdf_path, output_dir, ".pdf")
+        return _convert_to_images(file_path.replace(".pptx", ".pdf"), output_dir, ".pdf")
 
     raise ValueError(f"Unsupported extension: {ext}")
 
 
-# ── Step 2: script generation ─────────────────────────────────────────────────
+# ── Step 2: script generation (Groq vision) ────────────────────────────────
 
 def _generate_scripts(image_paths: list[str]) -> list[str]:
-    if not GEMINI_API_KEY:
-        logger.warning("GEMINI_API_KEY not set — using placeholder scripts.")
+    if not GROQ_API_KEY:
+        logger.warning("GROQ_API_KEY not set — using placeholder scripts.")
         return [f"This is slide {i + 1}." for i in range(len(image_paths))]
 
     try:
-        import google.generativeai as genai
+        from groq import Groq
 
-        genai.configure(api_key=GEMINI_API_KEY)
-        # gemini-2.0-flash: current multimodal model (1.5-flash deprecated on v1beta)
-        model = genai.GenerativeModel("gemini-2.0-flash")
+        client = Groq(api_key=GROQ_API_KEY)
         prompt = (
             "You are a concise educational narrator. "
             "Analyse this slide and write a clear, engaging 2-3 sentence narration "
@@ -158,17 +138,34 @@ def _generate_scripts(image_paths: list[str]) -> list[str]:
 
         scripts = []
         for path in image_paths:
-            img = Image.open(path)
-            response = model.generate_content([prompt, img])
-            scripts.append(response.text.strip())
+            with open(path, "rb") as f:
+                image_b64 = base64.b64encode(f.read()).decode("utf-8")
+
+            response = client.chat.completions.create(
+                model="meta-llama/llama-4-scout-17b-16e-instruct",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:image/png;base64,{image_b64}"},
+                            },
+                            {"type": "text", "text": prompt},
+                        ],
+                    }
+                ],
+                max_tokens=300,
+            )
+            scripts.append(response.choices[0].message.content.strip())
         return scripts
 
     except Exception:
-        logger.exception("Gemini call failed — falling back to placeholders.")
+        logger.exception("Groq call failed — falling back to placeholders.")
         return [f"Slide {i + 1}." for i in range(len(image_paths))]
 
 
-# ── Step 3: audio synthesis ───────────────────────────────────────────────────
+# ── Step 3: audio synthesis ────────────────────────────────────────────
 
 def _generate_audio(scripts: list[str], output_dir: str) -> list[str]:
     audio_dir = os.path.join(output_dir, "audio")
@@ -185,9 +182,7 @@ def _generate_audio(scripts: list[str], output_dir: str) -> list[str]:
         paths = []
         for i, script in enumerate(scripts):
             audio_generator = client.generate(
-                text=script,
-                voice=ELEVENLABS_VOICE_ID,
-                model="eleven_multilingual_v2",
+                text=script, voice=ELEVENLABS_VOICE_ID, model="eleven_multilingual_v2",
             )
             path = os.path.join(audio_dir, f"audio_{i:03d}.mp3")
             with open(path, "wb") as f:
@@ -201,17 +196,15 @@ def _generate_audio(scripts: list[str], output_dir: str) -> list[str]:
         return [_silent_stub(os.path.join(audio_dir, f"audio_{i:03d}.mp3"), 4) for i in range(len(scripts))]
 
 
-def _silent_stub(path: str, duration_s: int = 3) -> str:
+def _silent_stub(path: str, duration_s: int = 4) -> str:
     subprocess.run(
-        ["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",
-         "-t", str(duration_s), path],
-        check=True,
-        capture_output=True,
+        ["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono", "-t", str(duration_s), path],
+        check=True, capture_output=True,
     )
     return path
 
 
-# ── Step 4: subtitle generation ───────────────────────────────────────────────
+# ── Step 4: subtitle generation ────────────────────────────────────────────
 
 def _build_subtitles(scripts: list[str], audio_paths: list[str]) -> list[dict]:
     result = []
@@ -221,50 +214,32 @@ def _build_subtitles(scripts: list[str], audio_paths: list[str]) -> list[dict]:
         if not words:
             continue
         time_per_word = duration / len(words)
-        result.append(
-            {
-                "slide": i,
-                "duration": duration,
-                "words": [
-                    {
-                        "word": w,
-                        "start": round(j * time_per_word, 3),
-                        "end": round((j + 1) * time_per_word, 3),
-                    }
-                    for j, w in enumerate(words)
-                ],
-            }
-        )
+        result.append({
+            "slide": i,
+            "duration": duration,
+            "words": [
+                {"word": w, "start": round(j * time_per_word, 3), "end": round((j + 1) * time_per_word, 3)}
+                for j, w in enumerate(words)
+            ],
+        })
     return result
 
 
 def _audio_duration(audio_path: str) -> float:
     try:
         result = subprocess.run(
-            [
-                "ffprobe", "-v", "error",
-                "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1",
-                audio_path,
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", audio_path],
+            capture_output=True, text=True, check=True,
         )
         return float(result.stdout.strip())
     except Exception:
         return 4.0
 
 
-# ── Step 5: Remotion render ───────────────────────────────────────────────────
+# ── Step 5: Remotion render ─────────────────────────────────────────────
 
-def _render_video(
-    job_id: str,
-    image_paths: list[str],
-    audio_paths: list[str],
-    subtitle_data: list[dict],
-    temp_dir: str,
-) -> str:
+def _render_video(job_id, image_paths, audio_paths, subtitle_data, temp_dir):
     videos_dir = "temporary_storage/videos"
     os.makedirs(videos_dir, exist_ok=True)
     output_path = os.path.join(videos_dir, f"{job_id}.mp4")
@@ -285,16 +260,12 @@ def _render_video(
     with open(props_path, "w") as f:
         json.dump(props, f)
 
-    remotion_dir = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "..", "remotion")
-    )
+    remotion_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "remotion"))
 
     try:
         subprocess.run(
             ["npx", "remotion", "render", "StudyReel", output_path, "--props", props_path],
-            cwd=remotion_dir,
-            check=True,
-            timeout=600,
+            cwd=remotion_dir, check=True, timeout=600,
         )
     except (FileNotFoundError, subprocess.CalledProcessError):
         logger.warning("Remotion unavailable — using ffmpeg fallback renderer.")
@@ -303,7 +274,7 @@ def _render_video(
     return output_path
 
 
-def _ffmpeg_fallback(image_paths: list[str], audio_paths: list[str], output_path: str) -> None:
+def _ffmpeg_fallback(image_paths, audio_paths, output_path):
     segment_dir = os.path.dirname(output_path)
     segments = []
 
@@ -312,20 +283,13 @@ def _ffmpeg_fallback(image_paths: list[str], audio_paths: list[str], output_path
         duration = _audio_duration(aud)
         subprocess.run(
             [
-                "ffmpeg", "-y",
-                "-loop", "1", "-i", img,
-                "-i", aud,
+                "ffmpeg", "-y", "-loop", "1", "-i", img, "-i", aud,
                 "-c:v", "libx264", "-tune", "stillimage",
                 "-c:a", "aac", "-b:a", "192k",
-                "-vf", (
-                    "scale=1080:1920:force_original_aspect_ratio=decrease,"
-                    "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black"
-                ),
-                "-shortest", "-t", str(duration),
-                seg,
+                "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black",
+                "-shortest", "-t", str(duration), seg,
             ],
-            check=True,
-            capture_output=True,
+            check=True, capture_output=True,
         )
         segments.append(seg)
 
@@ -336,8 +300,7 @@ def _ffmpeg_fallback(image_paths: list[str], audio_paths: list[str], output_path
 
     subprocess.run(
         ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_list, "-c", "copy", output_path],
-        check=True,
-        capture_output=True,
+        check=True, capture_output=True,
     )
 
     for seg in segments:
