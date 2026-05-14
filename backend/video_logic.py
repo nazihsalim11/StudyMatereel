@@ -21,8 +21,6 @@ load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env")
 logger = logging.getLogger(__name__)
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
-ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 
 # ── Windows tool paths ────────────────────────────────────────────────────────
@@ -190,37 +188,19 @@ def _generate_scripts(image_paths: list[str]) -> list[str]:
 # ── Step 3: audio synthesis ───────────────────────────────────────────────────
 
 def _generate_audio(scripts: list[str], output_dir: str) -> list[str]:
-    """
-    Send each script to ElevenLabs TTS and save the resulting MP3.
-    Generates silent stub files when ELEVENLABS_API_KEY is not set.
-    """
     audio_dir = os.path.join(output_dir, "audio")
     os.makedirs(audio_dir, exist_ok=True)
-
-    if not ELEVENLABS_API_KEY:
-        logger.warning("ELEVENLABS_API_KEY not set — generating silent audio stubs.")
-        return [_silent_stub(os.path.join(audio_dir, f"audio_{i:03d}.mp3"), 4) for i in range(len(scripts))]
-
     try:
-        from elevenlabs.client import ElevenLabs
-
-        client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
+        from gtts import gTTS
         paths = []
         for i, script in enumerate(scripts):
-            audio_generator = client.generate(
-                text=script,
-                voice=ELEVENLABS_VOICE_ID,
-                model="eleven_multilingual_v2",
-            )
             path = os.path.join(audio_dir, f"audio_{i:03d}.mp3")
-            with open(path, "wb") as f:
-                for chunk in audio_generator:
-                    f.write(chunk)
+            tts = gTTS(text=script, lang="en", slow=False)
+            tts.save(path)
             paths.append(path)
         return paths
-
     except Exception:
-        logger.exception("ElevenLabs call failed — generating silent stubs.")
+        logger.exception("gTTS failed — generating silent stubs.")
         return [_silent_stub(os.path.join(audio_dir, f"audio_{i:03d}.mp3"), 4) for i in range(len(scripts))]
 
 
