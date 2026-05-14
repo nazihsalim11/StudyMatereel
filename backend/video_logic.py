@@ -23,7 +23,6 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 
 # ── Windows tool paths ────────────────────────────────────────────────────────
-# Override via .env if you installed to a non-default location.
 IS_WINDOWS = platform.system() == "Windows"
 
 POPPLER_PATH: str | None = os.getenv("POPPLER_PATH") or (
@@ -97,21 +96,32 @@ def process_file(job_id: str, file_path: str, jobs: dict) -> None:
 
 # ── Step 1: slide conversion ──────────────────────────────────────────────────
 
+MAX_SLIDES = 10  # hard cap to stay within 512 MB free-tier RAM
+
+
 def _convert_to_images(file_path: str, output_dir: str, ext: str) -> list[str]:
     slides_dir = os.path.join(output_dir, "slides")
     os.makedirs(slides_dir, exist_ok=True)
 
     if ext == ".pdf":
-        pages = convert_from_path(file_path, dpi=150, fmt="png", poppler_path=POPPLER_PATH)
+        # Convert one page at a time at 96 DPI to minimise peak RAM usage.
+        # 96 DPI is plenty for a 1080×1920 screen video.
         paths = []
-        for i, page in enumerate(pages):
-            out = os.path.join(slides_dir, f"slide_{i:03d}.png")
-            page.save(out, "PNG")
+        for i in range(1, MAX_SLIDES + 1):
+            pages = convert_from_path(
+                file_path, dpi=96, fmt="png",
+                poppler_path=POPPLER_PATH,
+                first_page=i, last_page=i,
+            )
+            if not pages:
+                break
+            out = os.path.join(slides_dir, f"slide_{i - 1:03d}.png")
+            pages[0].save(out, "PNG")
+            pages[0].close()
             paths.append(out)
         return paths
 
     if ext == ".pptx":
-        # Convert PPTX → PDF via LibreOffice, then recurse
         if IS_WINDOWS and not Path(LIBREOFFICE_PATH).exists():
             raise RuntimeError(
                 f"LibreOffice not found at '{LIBREOFFICE_PATH}'. "
@@ -177,6 +187,7 @@ def _generate_scripts(image_paths: list[str]) -> list[str]:
                 max_tokens=300,
             )
             scripts.append(response.choices[0].message.content.strip())
+            del image_b64
         return scripts
 
     except Exception:
@@ -204,9 +215,8 @@ def _generate_audio(scripts: list[str], output_dir: str) -> list[str]:
 
 
 def _silent_stub(path: str, duration_s: int = 3) -> str:
-    """Create a silent MP3 of the given duration using ffmpeg."""
     subprocess.run(
-        ["ffmpeg", "-y", "-f", "lavfi", "-i", f"anullsrc=r=44100:cl=mono",
+        ["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",
          "-t", str(duration_s), path],
         check=True,
         capture_output=True,
@@ -217,14 +227,6 @@ def _silent_stub(path: str, duration_s: int = 3) -> str:
 # ── Step 4: subtitle generation ───────────────────────────────────────────────
 
 def _build_subtitles(scripts: list[str], audio_paths: list[str]) -> list[dict]:
-    """
-    Produce word-level timestamps using a naïve even-distribution model.
-
-    Schema:
-      [{"slide": 0, "words": [{"word": "Hello", "start": 0.0, "end": 0.3}]}]
-
-    For production, replace with Whisper forced-alignment timestamps.
-    """
     result = []
     for i, (script, audio_path) in enumerate(zip(scripts, audio_paths)):
         duration = _audio_duration(audio_path)
@@ -281,7 +283,6 @@ def _render_video(
     os.makedirs(videos_dir, exist_ok=True)
     output_path = os.path.join(videos_dir, f"{job_id}.mp4")
 
-    # Build props for the Remotion composition
     props = {
         "slides": [
             {
@@ -360,6 +361,11 @@ def _ffmpeg_fallback(
             capture_output=True,
         )
         segments.append(seg)
+        # Free disk space — source image no longer needed after encoding
+        try:
+            os.remove(img)
+        except OSError:
+            pass
         if jobs is not None and job_id is not None:
             jobs[job_id]["progress"] = 75 + int(20 * (i + 1) / n)
 
@@ -374,7 +380,6 @@ def _ffmpeg_fallback(
         capture_output=True,
     )
 
-    # Clean up segment files
     for seg in segments:
         os.remove(seg)
     os.remove(concat_list)
