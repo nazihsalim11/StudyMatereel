@@ -10,6 +10,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import base64
+
 from dotenv import load_dotenv
 from pdf2image import convert_from_path
 from PIL import Image
@@ -18,7 +20,7 @@ load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env")
 
 logger = logging.getLogger(__name__)
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
@@ -141,35 +143,47 @@ def _convert_to_images(file_path: str, output_dir: str, ext: str) -> list[str]:
 # ── Step 2: script generation ─────────────────────────────────────────────────
 
 def _generate_scripts(image_paths: list[str]) -> list[str]:
-    """
-    Call Gemini 1.5 Flash Vision to produce a short narration for each slide.
-    Falls back to placeholder text when GEMINI_API_KEY is not set.
-    """
-    if not GEMINI_API_KEY:
-        logger.warning("GEMINI_API_KEY not set — using placeholder scripts.")
+    if not GROQ_API_KEY:
+        logger.warning("GROQ_API_KEY not set — using placeholder scripts.")
         return [f"This is slide {i + 1}." for i in range(len(image_paths))]
 
     try:
-        import google.generativeai as genai
+        from groq import Groq
 
-        genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        client = Groq(api_key=GROQ_API_KEY)
         prompt = (
             "You are a concise educational narrator. "
-            "Analyse this slide and write a clear, engaging 2–3 sentence narration "
+            "Analyse this slide and write a clear, engaging 2-3 sentence narration "
             "suitable for a 30-second vertical video reel. "
             "Focus on the key concept. Do not say 'slide'."
         )
 
         scripts = []
         for path in image_paths:
-            img = Image.open(path)
-            response = model.generate_content([prompt, img])
-            scripts.append(response.text.strip())
+            with open(path, "rb") as f:
+                image_b64 = base64.b64encode(f.read()).decode("utf-8")
+
+            response = client.chat.completions.create(
+                model="meta-llama/llama-4-scout-17b-16e-instruct",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:image/png;base64,{image_b64}"},
+                            },
+                            {"type": "text", "text": prompt},
+                        ],
+                    }
+                ],
+                max_tokens=300,
+            )
+            scripts.append(response.choices[0].message.content.strip())
         return scripts
 
     except Exception:
-        logger.exception("Gemini call failed — falling back to placeholders.")
+        logger.exception("Groq call failed — falling back to placeholders.")
         return [f"Slide {i + 1}." for i in range(len(image_paths))]
 
 
