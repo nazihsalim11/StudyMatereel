@@ -1,15 +1,15 @@
 """
-Core pipeline: PDF/PPTX → slide images → Groq scripts → ElevenLabs audio
+Core pipeline: PDF/PPTX → slide images → Groq scripts → gTTS audio
               → word-level subtitles → Remotion video render.
 """
-import base64
 import json
 import logging
 import os
 import platform
 import subprocess
-import sys
 from pathlib import Path
+
+import base64
 
 from dotenv import load_dotenv
 from pdf2image import convert_from_path
@@ -20,11 +20,10 @@ load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env")
 logger = logging.getLogger(__name__)
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
-ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 
-# ── Windows tool paths ─────────────────────────────────────────────
+# ── Windows tool paths ───────────────────────────────────────────────────────────────────────────────
+# Override via .env if you installed to a non-default location.
 IS_WINDOWS = platform.system() == "Windows"
 
 POPPLER_PATH: str | None = os.getenv("POPPLER_PATH") or (
@@ -36,13 +35,13 @@ LIBREOFFICE_PATH: str = os.getenv("LIBREOFFICE_PATH") or (
 )
 
 
-# ── Job state helper ─────────────────────────────────────────────
+# ── Job state helper ─────────────────────────────────────────────────────────────────────────────
 
 def _update(jobs: dict, job_id: str, **kwargs) -> None:
     jobs[job_id].update(kwargs)
 
 
-# ── Main pipeline ─────────────────────────────────────────────
+# ── Main pipeline ──────────────────────────────────────────────────────────────────────────────
 
 def process_file(job_id: str, file_path: str, jobs: dict) -> None:
     """Entry point called by FastAPI BackgroundTasks."""
@@ -53,20 +52,24 @@ def process_file(job_id: str, file_path: str, jobs: dict) -> None:
 
         ext = Path(file_path).suffix.lower()
 
+        # Step 1 ── Convert slides to PNG images
         logger.info("[%s] Converting slides to images…", job_id)
         image_paths = _convert_to_images(file_path, temp_dir, ext)
         if not image_paths:
             raise ValueError("No slides found in the uploaded file.")
         _update(jobs, job_id, progress=25)
 
+        # Step 2 ── Groq Vision → narration scripts
         logger.info("[%s] Generating scripts with Groq…", job_id)
         scripts = _generate_scripts(image_paths)
         _update(jobs, job_id, progress=45)
 
-        logger.info("[%s] Synthesising audio with ElevenLabs…", job_id)
+        # Step 3 ── gTTS → audio files
+        logger.info("[%s] Synthesising audio with gTTS…", job_id)
         audio_paths = _generate_audio(scripts, temp_dir)
         _update(jobs, job_id, progress=65)
 
+        # Step 4 ── Build word-level subtitle JSON
         logger.info("[%s] Building subtitles…", job_id)
         subtitle_data = _build_subtitles(scripts, audio_paths)
         subtitle_path = os.path.join(temp_dir, "subtitles.json")
@@ -74,9 +77,16 @@ def process_file(job_id: str, file_path: str, jobs: dict) -> None:
             json.dump(subtitle_data, f, indent=2, ensure_ascii=False)
         _update(jobs, job_id, progress=75)
 
+        # Step 5 ── Remotion render
         logger.info("[%s] Rendering video…", job_id)
         _render_video(job_id, image_paths, audio_paths, subtitle_data, temp_dir)
-        _update(jobs, job_id, status="completed", progress=100, video_url=f"/videos/{job_id}.mp4")
+        _update(
+            jobs,
+            job_id,
+            status="completed",
+            progress=100,
+            video_url=f"/videos/{job_id}.mp4",
+        )
         logger.info("[%s] Pipeline complete.", job_id)
 
     except Exception:
@@ -85,7 +95,7 @@ def process_file(job_id: str, file_path: str, jobs: dict) -> None:
         _update(jobs, job_id, status="failed", error=traceback.format_exc(limit=3))
 
 
-# ── Step 1: slide conversion ────────────────────────────────────────────
+# ── Step 1: slide conversion ──────────────────────────────────────────────────────────────────────────
 
 def _convert_to_images(file_path: str, output_dir: str, ext: str) -> list[str]:
     slides_dir = os.path.join(output_dir, "slides")
@@ -101,24 +111,33 @@ def _convert_to_images(file_path: str, output_dir: str, ext: str) -> list[str]:
         return paths
 
     if ext == ".pptx":
+        # Convert PPTX → PDF via LibreOffice, then recurse
         if IS_WINDOWS and not Path(LIBREOFFICE_PATH).exists():
             raise RuntimeError(
                 f"LibreOffice not found at '{LIBREOFFICE_PATH}'. "
-                "Install from https://www.libreoffice.org or set LIBREOFFICE_PATH in .env"
+                "Please install it from https://www.libreoffice.org/download/download/ "
+                "or set LIBREOFFICE_PATH in your .env file."
             )
         result = subprocess.run(
-            [LIBREOFFICE_PATH, "--headless", "--convert-to", "pdf",
-             "--outdir", os.path.dirname(file_path), file_path],
-            capture_output=True, timeout=120,
+            [
+                LIBREOFFICE_PATH,
+                "--headless",
+                "--convert-to", "pdf",
+                "--outdir", os.path.dirname(file_path),
+                file_path,
+            ],
+            capture_output=True,
+            timeout=120,
         )
         if result.returncode != 0:
             raise RuntimeError(f"LibreOffice conversion failed: {result.stderr.decode()}")
-        return _convert_to_images(file_path.replace(".pptx", ".pdf"), output_dir, ".pdf")
+        pdf_path = file_path.replace(".pptx", ".pdf")
+        return _convert_to_images(pdf_path, output_dir, ".pdf")
 
     raise ValueError(f"Unsupported extension: {ext}")
 
 
-# ── Step 2: script generation (Groq vision) ────────────────────────────────
+# ── Step 2: script generation ─────────────────────────────────────────────────────────────────────────
 
 def _generate_scripts(image_paths: list[str]) -> list[str]:
     if not GROQ_API_KEY:
@@ -165,48 +184,47 @@ def _generate_scripts(image_paths: list[str]) -> list[str]:
         return [f"Slide {i + 1}." for i in range(len(image_paths))]
 
 
-# ── Step 3: audio synthesis ────────────────────────────────────────────
+# ── Step 3: audio synthesis ───────────────────────────────────────────────────────────────────────────
 
 def _generate_audio(scripts: list[str], output_dir: str) -> list[str]:
     audio_dir = os.path.join(output_dir, "audio")
     os.makedirs(audio_dir, exist_ok=True)
-
-    if not ELEVENLABS_API_KEY:
-        logger.warning("ELEVENLABS_API_KEY not set — generating silent audio stubs.")
-        return [_silent_stub(os.path.join(audio_dir, f"audio_{i:03d}.mp3"), 4) for i in range(len(scripts))]
-
     try:
-        from elevenlabs.client import ElevenLabs
-
-        client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
+        from gtts import gTTS
         paths = []
         for i, script in enumerate(scripts):
-            audio_generator = client.generate(
-                text=script, voice=ELEVENLABS_VOICE_ID, model="eleven_multilingual_v2",
-            )
             path = os.path.join(audio_dir, f"audio_{i:03d}.mp3")
-            with open(path, "wb") as f:
-                for chunk in audio_generator:
-                    f.write(chunk)
+            tts = gTTS(text=script, lang="en", slow=False)
+            tts.save(path)
             paths.append(path)
         return paths
-
     except Exception:
-        logger.exception("ElevenLabs call failed — generating silent stubs.")
+        logger.exception("gTTS failed — generating silent stubs.")
         return [_silent_stub(os.path.join(audio_dir, f"audio_{i:03d}.mp3"), 4) for i in range(len(scripts))]
 
 
-def _silent_stub(path: str, duration_s: int = 4) -> str:
+def _silent_stub(path: str, duration_s: int = 3) -> str:
+    """Create a silent MP3 of the given duration using ffmpeg."""
     subprocess.run(
-        ["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono", "-t", str(duration_s), path],
-        check=True, capture_output=True,
+        ["ffmpeg", "-y", "-f", "lavfi", "-i", f"anullsrc=r=44100:cl=mono",
+         "-t", str(duration_s), path],
+        check=True,
+        capture_output=True,
     )
     return path
 
 
-# ── Step 4: subtitle generation ────────────────────────────────────────────
+# ── Step 4: subtitle generation ─────────────────────────────────────────────────────────────────────────
 
 def _build_subtitles(scripts: list[str], audio_paths: list[str]) -> list[dict]:
+    """
+    Produce word-level timestamps using a naïve even-distribution model.
+
+    Schema:
+      [{"slide": 0, "words": [{"word": "Hello", "start": 0.0, "end": 0.3}]}]
+
+    For production, replace with Whisper forced-alignment timestamps.
+    """
     result = []
     for i, (script, audio_path) in enumerate(zip(scripts, audio_paths)):
         duration = _audio_duration(audio_path)
@@ -214,36 +232,55 @@ def _build_subtitles(scripts: list[str], audio_paths: list[str]) -> list[dict]:
         if not words:
             continue
         time_per_word = duration / len(words)
-        result.append({
-            "slide": i,
-            "duration": duration,
-            "words": [
-                {"word": w, "start": round(j * time_per_word, 3), "end": round((j + 1) * time_per_word, 3)}
-                for j, w in enumerate(words)
-            ],
-        })
+        result.append(
+            {
+                "slide": i,
+                "duration": duration,
+                "words": [
+                    {
+                        "word": w,
+                        "start": round(j * time_per_word, 3),
+                        "end": round((j + 1) * time_per_word, 3),
+                    }
+                    for j, w in enumerate(words)
+                ],
+            }
+        )
     return result
 
 
 def _audio_duration(audio_path: str) -> float:
     try:
         result = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", audio_path],
-            capture_output=True, text=True, check=True,
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                audio_path,
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
         )
         return float(result.stdout.strip())
     except Exception:
         return 4.0
 
 
-# ── Step 5: Remotion render ─────────────────────────────────────────────
+# ── Step 5: Remotion render ───────────────────────────────────────────────────────────────────────────
 
-def _render_video(job_id, image_paths, audio_paths, subtitle_data, temp_dir):
+def _render_video(
+    job_id: str,
+    image_paths: list[str],
+    audio_paths: list[str],
+    subtitle_data: list[dict],
+    temp_dir: str,
+) -> str:
     videos_dir = "temporary_storage/videos"
     os.makedirs(videos_dir, exist_ok=True)
     output_path = os.path.join(videos_dir, f"{job_id}.mp4")
 
+    # Build props for the Remotion composition
     props = {
         "slides": [
             {
@@ -260,12 +297,21 @@ def _render_video(job_id, image_paths, audio_paths, subtitle_data, temp_dir):
     with open(props_path, "w") as f:
         json.dump(props, f)
 
-    remotion_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "remotion"))
+    remotion_dir = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "remotion")
+    )
 
     try:
         subprocess.run(
-            ["npx", "remotion", "render", "StudyReel", output_path, "--props", props_path],
-            cwd=remotion_dir, check=True, timeout=600,
+            [
+                "npx", "remotion", "render",
+                "StudyReel",
+                output_path,
+                "--props", props_path,
+            ],
+            cwd=remotion_dir,
+            check=True,
+            timeout=600,
         )
     except (FileNotFoundError, subprocess.CalledProcessError):
         logger.warning("Remotion unavailable — using ffmpeg fallback renderer.")
@@ -274,7 +320,11 @@ def _render_video(job_id, image_paths, audio_paths, subtitle_data, temp_dir):
     return output_path
 
 
-def _ffmpeg_fallback(image_paths, audio_paths, output_path):
+def _ffmpeg_fallback(image_paths: list[str], audio_paths: list[str], output_path: str) -> None:
+    """
+    Stitch slides + audio into a 1080×1920 vertical MP4 using ffmpeg.
+    Used when Remotion is not installed / fails.
+    """
     segment_dir = os.path.dirname(output_path)
     segments = []
 
@@ -283,13 +333,20 @@ def _ffmpeg_fallback(image_paths, audio_paths, output_path):
         duration = _audio_duration(aud)
         subprocess.run(
             [
-                "ffmpeg", "-y", "-loop", "1", "-i", img, "-i", aud,
+                "ffmpeg", "-y",
+                "-loop", "1", "-i", img,
+                "-i", aud,
                 "-c:v", "libx264", "-tune", "stillimage",
                 "-c:a", "aac", "-b:a", "192k",
-                "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black",
-                "-shortest", "-t", str(duration), seg,
+                "-vf", (
+                    "scale=1080:1920:force_original_aspect_ratio=decrease,"
+                    "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black"
+                ),
+                "-shortest", "-t", str(duration),
+                seg,
             ],
-            check=True, capture_output=True,
+            check=True,
+            capture_output=True,
         )
         segments.append(seg)
 
@@ -300,9 +357,11 @@ def _ffmpeg_fallback(image_paths, audio_paths, output_path):
 
     subprocess.run(
         ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_list, "-c", "copy", output_path],
-        check=True, capture_output=True,
+        check=True,
+        capture_output=True,
     )
 
+    # Clean up segment files
     for seg in segments:
         os.remove(seg)
     os.remove(concat_list)
