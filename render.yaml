@@ -3,7 +3,7 @@ services:
     name: studyreels-backend
     runtime: docker
     dockerfilePath: backend/Dockerfile
-    dockerContext: .
+    dockerContext: backend
     plan: free
     envVars:
       - key: GROQ_API_KEY
