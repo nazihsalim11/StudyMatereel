@@ -5,7 +5,9 @@ Core pipeline: PDF/PPTX → slide images → Gemini scripts → ElevenLabs audio
 import json
 import logging
 import os
+import platform
 import subprocess
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -20,6 +22,18 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
+
+# ── Windows tool paths ────────────────────────────────────────────────────────
+# Override via .env if you installed to a non-default location.
+IS_WINDOWS = platform.system() == "Windows"
+
+POPPLER_PATH: str | None = os.getenv("POPPLER_PATH") or (
+    r"C:\poppler\Library\bin" if IS_WINDOWS else None
+)
+
+LIBREOFFICE_PATH: str = os.getenv("LIBREOFFICE_PATH") or (
+    r"C:\Program Files\LibreOffice\program\soffice.exe" if IS_WINDOWS else "libreoffice"
+)
 
 
 # ── Job state helper ──────────────────────────────────────────────────────────
@@ -89,7 +103,7 @@ def _convert_to_images(file_path: str, output_dir: str, ext: str) -> list[str]:
     os.makedirs(slides_dir, exist_ok=True)
 
     if ext == ".pdf":
-        pages = convert_from_path(file_path, dpi=150, fmt="png")
+        pages = convert_from_path(file_path, dpi=150, fmt="png", poppler_path=POPPLER_PATH)
         paths = []
         for i, page in enumerate(pages):
             out = os.path.join(slides_dir, f"slide_{i:03d}.png")
@@ -99,9 +113,15 @@ def _convert_to_images(file_path: str, output_dir: str, ext: str) -> list[str]:
 
     if ext == ".pptx":
         # Convert PPTX → PDF via LibreOffice, then recurse
+        if IS_WINDOWS and not Path(LIBREOFFICE_PATH).exists():
+            raise RuntimeError(
+                f"LibreOffice not found at '{LIBREOFFICE_PATH}'. "
+                "Please install it from https://www.libreoffice.org/download/download/ "
+                "or set LIBREOFFICE_PATH in your .env file."
+            )
         result = subprocess.run(
             [
-                "libreoffice",
+                LIBREOFFICE_PATH,
                 "--headless",
                 "--convert-to", "pdf",
                 "--outdir", os.path.dirname(file_path),
