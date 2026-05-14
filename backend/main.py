@@ -16,10 +16,14 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="StudyReels API", version="1.0.0")
 
+# Read allowed origins from env var — comma-separated list or * for all
+_raw_origins = os.getenv("CORS_ORIGINS", "*")
+_allow_origins = [o.strip() for o in _raw_origins.split(",")] if _raw_origins != "*" else ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
-    allow_credentials=True,
+    allow_origins=_allow_origins,
+    allow_credentials=False,  # must be False when allow_origins=["*"]
     allow_methods=["*"],
     allow_headers=["*"],
 )
