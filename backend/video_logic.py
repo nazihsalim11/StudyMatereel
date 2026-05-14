@@ -23,7 +23,7 @@ ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 
-# ── Windows tool paths ─────────────────────────────────────────────
+# ── Windows tool paths ────────────────────────────────────────────────────────
 IS_WINDOWS = platform.system() == "Windows"
 
 POPPLER_PATH: str | None = os.getenv("POPPLER_PATH") or (
@@ -35,13 +35,13 @@ LIBREOFFICE_PATH: str = os.getenv("LIBREOFFICE_PATH") or (
 )
 
 
-# ── Job state helper ─────────────────────────────────────────────
+# ── Job state helper ──────────────────────────────────────────────────────────
 
 def _update(jobs: dict, job_id: str, **kwargs) -> None:
     jobs[job_id].update(kwargs)
 
 
-# ── Main pipeline ─────────────────────────────────────────────
+# ── Main pipeline ─────────────────────────────────────────────────────────────
 
 def process_file(job_id: str, file_path: str, jobs: dict) -> None:
     """Entry point called by FastAPI BackgroundTasks."""
@@ -95,7 +95,7 @@ def process_file(job_id: str, file_path: str, jobs: dict) -> None:
         _update(jobs, job_id, status="failed", error=traceback.format_exc(limit=3))
 
 
-# ── Step 1: slide conversion ────────────────────────────────────────────
+# ── Step 1: slide conversion ──────────────────────────────────────────────────
 
 def _convert_to_images(file_path: str, output_dir: str, ext: str) -> list[str]:
     slides_dir = os.path.join(output_dir, "slides")
@@ -136,7 +136,7 @@ def _convert_to_images(file_path: str, output_dir: str, ext: str) -> list[str]:
     raise ValueError(f"Unsupported extension: {ext}")
 
 
-# ── Step 2: script generation ────────────────────────────────────────────
+# ── Step 2: script generation ─────────────────────────────────────────────────
 
 def _generate_scripts(image_paths: list[str]) -> list[str]:
     if not GEMINI_API_KEY:
@@ -147,10 +147,11 @@ def _generate_scripts(image_paths: list[str]) -> list[str]:
         import google.generativeai as genai
 
         genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        # gemini-2.0-flash: current multimodal model (1.5-flash deprecated on v1beta)
+        model = genai.GenerativeModel("gemini-2.0-flash")
         prompt = (
             "You are a concise educational narrator. "
-            "Analyse this slide and write a clear, engaging 2–3 sentence narration "
+            "Analyse this slide and write a clear, engaging 2-3 sentence narration "
             "suitable for a 30-second vertical video reel. "
             "Focus on the key concept. Do not say 'slide'."
         )
@@ -167,7 +168,7 @@ def _generate_scripts(image_paths: list[str]) -> list[str]:
         return [f"Slide {i + 1}." for i in range(len(image_paths))]
 
 
-# ── Step 3: audio synthesis ────────────────────────────────────────────
+# ── Step 3: audio synthesis ───────────────────────────────────────────────────
 
 def _generate_audio(scripts: list[str], output_dir: str) -> list[str]:
     audio_dir = os.path.join(output_dir, "audio")
@@ -210,7 +211,7 @@ def _silent_stub(path: str, duration_s: int = 3) -> str:
     return path
 
 
-# ── Step 4: subtitle generation ────────────────────────────────────────────
+# ── Step 4: subtitle generation ───────────────────────────────────────────────
 
 def _build_subtitles(scripts: list[str], audio_paths: list[str]) -> list[dict]:
     result = []
@@ -255,7 +256,7 @@ def _audio_duration(audio_path: str) -> float:
         return 4.0
 
 
-# ── Step 5: Remotion render ─────────────────────────────────────────────
+# ── Step 5: Remotion render ───────────────────────────────────────────────────
 
 def _render_video(
     job_id: str,
