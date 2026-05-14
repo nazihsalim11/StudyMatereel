@@ -79,7 +79,7 @@ def process_file(job_id: str, file_path: str, jobs: dict) -> None:
 
         # Step 5 ── Remotion render
         logger.info("[%s] Rendering video…", job_id)
-        _render_video(job_id, image_paths, audio_paths, subtitle_data, temp_dir)
+        _render_video(job_id, image_paths, audio_paths, subtitle_data, temp_dir, jobs)
         _update(
             jobs,
             job_id,
@@ -275,6 +275,7 @@ def _render_video(
     audio_paths: list[str],
     subtitle_data: list[dict],
     temp_dir: str,
+    jobs: dict | None = None,
 ) -> str:
     videos_dir = "temporary_storage/videos"
     os.makedirs(videos_dir, exist_ok=True)
@@ -315,20 +316,28 @@ def _render_video(
         )
     except (FileNotFoundError, subprocess.CalledProcessError):
         logger.warning("Remotion unavailable — using ffmpeg fallback renderer.")
-        _ffmpeg_fallback(image_paths, audio_paths, output_path)
+        _ffmpeg_fallback(image_paths, audio_paths, output_path, jobs, job_id)
 
     return output_path
 
 
-def _ffmpeg_fallback(image_paths: list[str], audio_paths: list[str], output_path: str) -> None:
+def _ffmpeg_fallback(
+    image_paths: list[str],
+    audio_paths: list[str],
+    output_path: str,
+    jobs: dict | None = None,
+    job_id: str | None = None,
+) -> None:
     """
     Stitch slides + audio into a 1080×1920 vertical MP4 using ffmpeg.
     Used when Remotion is not installed / fails.
     """
     segment_dir = os.path.dirname(output_path)
     segments = []
+    n = len(image_paths)
 
     for i, (img, aud) in enumerate(zip(image_paths, audio_paths)):
+        logger.info("Encoding slide %d/%d…", i + 1, n)
         seg = os.path.join(segment_dir, f"_seg_{i:03d}.mp4")
         duration = _audio_duration(aud)
         subprocess.run(
@@ -351,6 +360,8 @@ def _ffmpeg_fallback(image_paths: list[str], audio_paths: list[str], output_path
             capture_output=True,
         )
         segments.append(seg)
+        if jobs is not None and job_id is not None:
+            jobs[job_id]["progress"] = 75 + int(20 * (i + 1) / n)
 
     concat_list = os.path.join(segment_dir, "_concat.txt")
     with open(concat_list, "w") as f:
