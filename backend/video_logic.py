@@ -1,5 +1,5 @@
 """
-Core pipeline: PDF/PPTX → slide images → Gemini scripts → ElevenLabs audio
+Core pipeline: PDF/PPTX → slide images → Groq scripts → gTTS audio
               → word-level subtitles → Remotion video render.
 """
 import json
@@ -7,7 +7,6 @@ import logging
 import os
 import platform
 import subprocess
-import sys
 from pathlib import Path
 
 import base64
@@ -60,13 +59,13 @@ def process_file(job_id: str, file_path: str, jobs: dict) -> None:
             raise ValueError("No slides found in the uploaded file.")
         _update(jobs, job_id, progress=25)
 
-        # Step 2 ── Gemini Vision → narration scripts
-        logger.info("[%s] Generating scripts with Gemini…", job_id)
+        # Step 2 ── Groq Vision → narration scripts
+        logger.info("[%s] Generating scripts with Groq…", job_id)
         scripts = _generate_scripts(image_paths)
         _update(jobs, job_id, progress=45)
 
-        # Step 3 ── ElevenLabs TTS → audio files
-        logger.info("[%s] Synthesising audio with ElevenLabs…", job_id)
+        # Step 3 ── gTTS → audio files
+        logger.info("[%s] Synthesising audio with gTTS…", job_id)
         audio_paths = _generate_audio(scripts, temp_dir)
         _update(jobs, job_id, progress=65)
 
